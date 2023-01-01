@@ -1,0 +1,165 @@
+// Study Area
+var area=ee.FeatureCollection('users/yourname/yourshapefile');
+
+//name bands
+var bandasStd = ['BLUE','GREEN', 'RED', 'NIR', 'SWIR', 'pixel_qa'];
+var bandas8 = ['B2','B3', 'B4','B5', 'B6','pixel_qa'];
+var bandas5 = ['B1', 'B2', 'B3', 'B4', 'B5', 'pixel_qa'];
+
+var renombrar8 = function(img){
+  
+  
+  return img.select(bandas8, bandasStd)
+}
+var renombrar5 = function(img){
+  return img.select(bandas5, bandasStd)
+}
+
+// Mask clouds
+//COL8
+function maskL8sr(image) {
+  // Bits 3 and 5 are cloud shadow and cloud, respectively.
+  var cloudShadowBitMask = 1 << 3;
+  var cloudsBitMask = 1 << 5;
+
+  // Get the pixel QA band.
+  var qa = image.select('pixel_qa');
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0)
+      .and(qa.bitwiseAnd(cloudsBitMask).eq(0));
+
+
+  // Return the masked image, scaled to reflectance, without the QA bands.
+  return image.updateMask(mask)
+      .copyProperties(image, ["system:time_start"]);
+}
+//COL 5 Y 7 spectral variables
+function cloudMaskL457(image) {
+  var qa = image.select('pixel_qa');
+  // If the cloud bit (5) is set and the cloud confidence (7) is high
+  // or the cloud shadow bit is set (3), then it's a bad pixel.
+  var cloud = qa.bitwiseAnd(1 << 5)
+          .and(qa.bitwiseAnd(1 << 7))
+          .or(qa.bitwiseAnd(1 << 3))
+  // Remove edge pixels that don't occur in all bands
+  var mask2 = image.mask().reduce(ee.Reducer.min());
+  return image.updateMask(cloud.not()).updateMask(mask2);
+};
+
+//NDVI, vegetation index
+function addNDVI(image) {
+  var ndvi = image.normalizedDifference(['NIR', 'RED']).rename('ndvi')
+  return image.addBands([ndvi])
+}
+
+//DEM, topographic variables
+var dem=ee.Image("USGS/SRTMGL1_003")
+dem=dem.clip(geometry)
+function addDEM(image) {
+   return image.addBands([dem]);
+}
+
+
+//Select and filter collections
+var col8 = ee.ImageCollection("LANDSAT/LC08/C01/T1_SR").filterBounds(area)
+                                                       .filterDate('2013-11-01', '2017-12-30')
+                                                       .filter(ee.Filter.lt('CLOUD_COVER',20))
+                                                       .map(renombrar8)
+                                                       .map(maskL8sr);
+
+function fill(image) {
+   return image.focal_mean(2, 'square', 'pixels', 1).blend(image)
+}
+                                                      
+var col7 = ee.ImageCollection("LANDSAT/LE07/C01/T1_SR").filterBounds(area)
+                                                       .filterDate('2012-01-01', '2013-12-30')
+                                                       .filter(ee.Filter.lt('CLOUD_COVER',20))
+                                                       .map(renombrar5)
+                                                       .map(cloudMaskL457);
+                                                
+
+
+
+col7.map(fill)
+
+var col5 = ee.ImageCollection("LANDSAT/LT05/C01/T1_SR").filterBounds(area)
+                                                       .filterDate('1988-01-01', '2011-12-30')
+                                                       .filter(ee.Filter.lt('CLOUD_COVER',20))
+                                                       .map(renombrar5)
+                                                       .map(cloudMaskL457);
+
+var colMerge = col5.merge(col7).merge(col8)
+                               .select(['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR'])
+                               .map(function(img){
+                                 return img.clip(area.geometry())
+                               })
+colMerge = colMerge.map(addNDVI)
+
+
+
+var anios = ee.List.sequence(1988, 2017);
+
+//Iterate once for all collections creating annual winter and summer scenes
+var mediasAnuales = anios.map(function(anio){
+    var startVerano = ee.Date.fromYMD(anio, 10, 1);
+    var endVerano = startVerano.advance(7, 'month');
+    var startInvierno = ee.Date.fromYMD(anio, 6, 1);
+    var endInvierno = startInvierno.advance(4, 'month');
+    var verano = colMerge.filterDate(startVerano, endVerano).reduce(ee.Reducer.median());
+    var invierno = colMerge.filterDate(startInvierno, endInvierno).reduce(ee.Reducer.median());
+    return verano.addBands(invierno).set('year', anio)
+})
+//print(mediasAnuales)
+
+
+//Standardize summer and winter values in each image
+var makeZ = function(img){
+  var mean = img.reduceRegion({reducer: ee.Reducer.mean(),
+                               geometry: area.geometry(),
+                               scale: 30,
+                               bestEffort: true});
+  var std = img.reduceRegion({reducer: ee.Reducer.stdDev(),
+                               geometry: area.geometry(),
+                               scale: 30,
+                               bestEffort: true});
+  var imgMean = mean.toImage(mean.keys());
+  var imgStd = std.toImage(std.keys());
+  var resta  = img.subtract(imgMean);
+  var zValues = resta.divide(imgStd);
+  return zValues.copyProperties(img)
+}
+
+//colection Z
+var colZ = ee.ImageCollection(mediasAnuales).map(makeZ);
+colZ=colZ.map(addDEM)
+
+//Use the 2017 spectral data to train the classifier
+var img17 = listZ.get(28);
+img17=ee.Image(img17)
+var samples = urb.merge(agri).merge(bosqs).merge(bosqu).merge(exo1).merge(lig).merge(arb).merge(past).merge(suel).merge(cit).merge(gled);
+var seed = 2000;
+samples = samples.randomColumn('random', seed);
+var set_datos = img17.sampleRegions({
+  // Get the sample from the polygons FeatureCollection.
+  collection: samples,
+  // Keep this list of properties from the polygons.
+  properties: ['clase', "random"],
+  // Set the scale to get Landsat pixels in the polygons.
+  scale: 30
+});
+
+var split = 0.7;  // Roughly 70% training, 30% testing.
+var training = set_datos.filter(ee.Filter.lt('random', split));
+var testing = set_datos.filter(ee.Filter.gte('random', split));
+
+var bandas=[ "BLUE_median","GREEN_median","RED_median","NIR_median","SWIR_median", "ndvi_median_1", "elevation","BLUE_median_1","GREEN_median_1","RED_median_1","NIR_median_1","SWIR_median_1"];
+
+function classification(image){
+  var trained = ee.Classifier.randomForest({numberOfTrees:50}).train(training, "clase", bandas);
+  return image.select(bandas).classify(trained);
+}
+
+var clasificado=colZ.map(classification)
+//print("CLASIFICACION", clasificado)
+var listC = clasificado.toList(clasificado.size())
