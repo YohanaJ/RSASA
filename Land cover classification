@@ -1,5 +1,5 @@
 // Study Area
-var area=ee.FeatureCollection('users/yourname/yourshapefile');
+var area=ee.FeatureCollection('users/yourusername/yourshapefile');
 
 //name bands
 var bandasStd = ['BLUE','GREEN', 'RED', 'NIR', 'SWIR', 'pixel_qa'];
